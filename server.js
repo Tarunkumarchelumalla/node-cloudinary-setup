@@ -9,7 +9,7 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 const app = express();
-app.use(express.json()); // 👈 needed for POST body
+app.use(express.json({ limit: "15mb" })); // 👈 allow larger payloads
 const PORT = process.env.PORT || 4000;
 
 // ---- Supabase setup ----
@@ -25,8 +25,8 @@ cloudinary.config({
   api_secret: process.env.CLOUDINARY_API_SECRET,
 });
 
-// ---- Reusable Upload Function ----
-async function uploadToCloudinary(imageUrl) {
+// ---- Reusable Upload Functions ----
+async function uploadToCloudinaryFromUrl(imageUrl, folder = "supabase_uploads") {
   if (!imageUrl) throw new Error("No image URL provided");
 
   // Skip if already hosted on Cloudinary
@@ -34,21 +34,29 @@ async function uploadToCloudinary(imageUrl) {
     return { status: "skipped", url: imageUrl };
   }
 
-  const result = await cloudinary.uploader.upload(imageUrl, {
-    folder: "supabase_uploads",
-  });
-
-  return { status: "uploaded", url: result.secure_url };
+  const result = await cloudinary.uploader.upload(imageUrl, { folder });
+  return { status: "uploaded", url: result.secure_url, publicId: result.public_id };
 }
 
-// ---- API 1: Process whole handle ----
+async function uploadToCloudinaryFromBase64(base64Data, folder = "supabase_uploads") {
+  if (!base64Data) throw new Error("No base64 data provided");
+
+  const result = await cloudinary.uploader.upload(base64Data, { folder });
+  return { status: "uploaded", url: result.secure_url, publicId: result.public_id };
+}
+
+// ---- API 1: Process whole handle (with optional table/column) ----
 app.get('/upload/:handlename', async (req, res) => {
   const { handlename } = req.params;
 
+  // Optional query params: table & column
+  const table = req.query.table || "instagram_post";
+  const column = req.query.column || "displayurl";
+
   try {
     const { data, error } = await supabase
-      .from('instagram_post')
-      .select('id, displayurl')
+      .from(table)
+      .select(`id, ${column}`)
       .eq('handlename', handlename);
 
     if (error) throw error;
@@ -60,12 +68,12 @@ app.get('/upload/:handlename', async (req, res) => {
 
     for (const row of data) {
       try {
-        const result = await uploadToCloudinary(row.displayurl);
+        const result = await uploadToCloudinaryFromUrl(row[column]);
 
         if (result.status === "uploaded") {
           await supabase
-            .from('instagram_post')
-            .update({ displayurl: result.url })
+            .from(table)
+            .update({ [column]: result.url })
             .eq('id', row.id);
         }
 
@@ -82,16 +90,32 @@ app.get('/upload/:handlename', async (req, res) => {
   }
 });
 
-// ---- API 2: Upload single image directly ----
+// ---- API 2: Upload single image from URL ----
 app.post('/upload-url', async (req, res) => {
-  const { imageUrl } = req.body;
+  const { imageUrl, folder } = req.body;
 
   if (!imageUrl) {
     return res.status(400).json({ error: "imageUrl is required" });
   }
 
   try {
-    const result = await uploadToCloudinary(imageUrl);
+    const result = await uploadToCloudinaryFromUrl(imageUrl, folder || "supabase_uploads");
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ---- API 3: Upload single image from Base64 ----
+app.post('/upload-base64', async (req, res) => {
+  const { base64, folder } = req.body;
+
+  if (!base64) {
+    return res.status(400).json({ error: "base64 field is required" });
+  }
+
+  try {
+    const result = await uploadToCloudinaryFromBase64(base64, folder || "supabase_uploads");
     res.json(result);
   } catch (err) {
     res.status(500).json({ error: err.message });
