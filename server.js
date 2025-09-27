@@ -9,7 +9,8 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 const app = express();
-const PORT = process.env.PORT || 4000; // 👈 port 4000
+app.use(express.json()); // 👈 needed for POST body
+const PORT = process.env.PORT || 4000;
 
 // ---- Supabase setup ----
 const supabase = createClient(
@@ -24,7 +25,23 @@ cloudinary.config({
   api_secret: process.env.CLOUDINARY_API_SECRET,
 });
 
-// ---- Route ----
+// ---- Reusable Upload Function ----
+async function uploadToCloudinary(imageUrl) {
+  if (!imageUrl) throw new Error("No image URL provided");
+
+  // Skip if already hosted on Cloudinary
+  if (imageUrl.includes(`res.cloudinary.com/${process.env.CLOUDINARY_CLOUD_NAME}`)) {
+    return { status: "skipped", url: imageUrl };
+  }
+
+  const result = await cloudinary.uploader.upload(imageUrl, {
+    folder: "supabase_uploads",
+  });
+
+  return { status: "uploaded", url: result.secure_url };
+}
+
+// ---- API 1: Process whole handle ----
 app.get('/upload/:handlename', async (req, res) => {
   const { handlename } = req.params;
 
@@ -42,32 +59,41 @@ app.get('/upload/:handlename', async (req, res) => {
     const results = [];
 
     for (const row of data) {
-      if (!row.displayurl) continue;
-
-      if (row.displayurl.includes(`res.cloudinary.com/${process.env.CLOUDINARY_CLOUD_NAME}`)) {
-        results.push({ id: row.id, status: 'skipped (already uploaded)' });
-        continue;
-      }
-
       try {
-        const result = await cloudinary.uploader.upload(row.displayurl, {
-          folder: 'supabase_uploads',
-        });
+        const result = await uploadToCloudinary(row.displayurl);
 
-        await supabase
-          .from('instagram_post')
-          .update({ displayurl: result.secure_url })
-          .eq('id', row.id);
+        if (result.status === "uploaded") {
+          await supabase
+            .from('instagram_post')
+            .update({ displayurl: result.url })
+            .eq('id', row.id);
+        }
 
-        results.push({ id: row.id, status: 'uploaded', newUrl: result.secure_url });
+        results.push({ id: row.id, ...result });
       } catch (err) {
-        results.push({ id: row.id, status: 'failed', error: err.message });
+        results.push({ id: row.id, status: "failed", error: err.message });
       }
     }
 
     res.json({ message: `Process completed for ${handlename}`, results });
   } catch (err) {
-    console.error('❌ Script failed:', err.message);
+    console.error("❌ Script failed:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ---- API 2: Upload single image directly ----
+app.post('/upload-url', async (req, res) => {
+  const { imageUrl } = req.body;
+
+  if (!imageUrl) {
+    return res.status(400).json({ error: "imageUrl is required" });
+  }
+
+  try {
+    const result = await uploadToCloudinary(imageUrl);
+    res.json(result);
+  } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
